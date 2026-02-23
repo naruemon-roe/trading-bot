@@ -2,13 +2,14 @@
 # ══════════════════════════════════════════════
 #  Deploy Trading Bot to Digital Ocean / VPS
 #  Ubuntu 22.04 LTS
+#  v2 — Free (ไม่ใช้ MetaAPI)
 # ══════════════════════════════════════════════
 set -e
 
 PROJ_DIR="/opt/trading-bot"
 SERVICE="trading-bot"
 
-echo "🚀 Deploying Trading Bot..."
+echo "Deploying Trading Bot v2 (Free)..."
 
 # ── System Packages ──────────────────────────
 apt-get update -y
@@ -16,7 +17,7 @@ apt-get install -y python3 python3-pip python3-venv nginx
 
 # ── Copy Files ───────────────────────────────
 mkdir -p "$PROJ_DIR"
-cp app.py atr_calculator.py mt5_handler.py config.py requirements.txt "$PROJ_DIR/"
+cp app.py config.py requirements.txt "$PROJ_DIR/"
 
 # .env: copy example ถ้ายังไม่มี
 if [ ! -f "$PROJ_DIR/.env" ]; then
@@ -34,7 +35,7 @@ deactivate
 # ── Systemd Service ──────────────────────────
 cat > "/etc/systemd/system/$SERVICE.service" << EOF
 [Unit]
-Description=Trading Bot (TradingView → MetaAPI → MT5)
+Description=Trading Bot – Signal Server (TradingView → MT5 EA)
 After=network.target
 
 [Service]
@@ -88,13 +89,15 @@ echo ""
 echo "══════════════════════════════════════════"
 echo "  ✅  Deploy สำเร็จ!"
 echo "══════════════════════════════════════════"
-echo "  📡 Webhook  :  http://$VPS_IP/webhook"
-echo "  ❤️  Health   :  http://$VPS_IP/health"
-echo "  📝 App log  :  tail -f $PROJ_DIR/bot.log"
+echo "  Webhook   :  http://$VPS_IP/webhook"
+echo "  Health    :  http://$VPS_IP/health"
+echo "  Signals   :  http://$VPS_IP/signals?api_key=YOUR_KEY"
+echo "  App log   :  tail -f $PROJ_DIR/bot.log"
 echo "══════════════════════════════════════════"
 echo ""
-echo "  ⚠️  ขั้นตอนต่อไป:"
-echo "  1. แก้ไข $PROJ_DIR/.env  (ใส่ META_API_TOKEN, META_ACCOUNT_ID, API_KEY)"
+echo "  ขั้นตอนต่อไป:"
+echo "  1. แก้ไข $PROJ_DIR/.env  (ตั้ง API_KEY ที่แข็งแกร่ง)"
 echo "  2. systemctl restart $SERVICE"
-echo "  3. ตั้ง TradingView Alert → Webhook URL ด้านบน"
+echo "  3. นำ MPI_Bot.mq5 ใส่ MT5 บน PC ของคุณ"
+echo "  4. ตั้ง TradingView Alert → Webhook URL ด้านบน"
 echo ""

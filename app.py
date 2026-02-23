@@ -1,20 +1,24 @@
 """
-Trading Bot – Main App
-──────────────────────
-รับ TradingView Webhook → คำนวณ ATR TP/SL → Execute บน MT5 ผ่าน MetaAPI
-ทำงานทั้งหมดบน Linux VPS ไม่ต้องมี Windows PC
+Trading Bot – Signal Server  (v2 – Free, No MetaAPI)
+─────────────────────────────────────────────────────
+Architecture:
+  TradingView → POST /webhook  → เก็บ signal ใน SQLite
+  MT5 EA      → GET  /get_signal  → อ่าน signal ที่รอ
+  MT5 EA      → POST /confirm_signal → confirm หลัง trade executed
+
+ไม่ต้องใช้ MetaAPI หรือ MetaTrader5 package เลย
+MT5 EA บน PC ของคุณทำ trade เองทั้งหมด
 """
 
-import asyncio
 import logging
 import os
+import sqlite3
+import uuid
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify
 
 from config import Config
-from mt5_handler import MT5Handler
-from atr_calculator import ATRCalculator
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -30,10 +34,36 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── App & Global Handler ──────────────────────────────────────────────────────
+# ── App ────────────────────────────────────────────────────────────────────────
 
-app = Flask(__name__)
-mt5 = MT5Handler()
+app    = Flask(__name__)
+DB_PATH = os.getenv("DB_PATH", "signals.db")
+
+
+# ── SQLite Setup ───────────────────────────────────────────────────────────────
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id        TEXT PRIMARY KEY,
+                action    TEXT NOT NULL,
+                symbol    TEXT NOT NULL,
+                price     REAL NOT NULL,
+                status    TEXT NOT NULL DEFAULT 'pending',
+                created   TEXT NOT NULL,
+                confirmed TEXT
+            )
+        """)
+        conn.commit()
+
+init_db()
+
+
+def _db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -45,7 +75,6 @@ def health():
         "status": "ok",
         "utc":    datetime.now(timezone.utc).isoformat(),
         "symbol": Config.SYMBOL,
-        "lot":    Config.LOT_SIZE,
     })
 
 
@@ -58,19 +87,18 @@ def webhook():
     {
         "api_key": "...",
         "action":  "buy" | "sell",
-        "symbol":  "XAUUSD",       (optional, fallback to config)
-        "price":   2650.0          (float หรือ string ก็ได้)
+        "symbol":  "XAUUSD",   (optional, fallback to config)
+        "price":   2650.0      (float หรือ string ก็ได้)
     }
     """
     data = request.get_json(silent=True) or {}
     log.info("[WEBHOOK] %s", data)
 
-    # ── Auth ──────────────────────────────────────────────────────────────────
+    # Auth
     if data.get("api_key") != Config.API_KEY:
-        log.warning("[WEBHOOK] Unauthorized attempt")
+        log.warning("[WEBHOOK] Unauthorized")
         return jsonify({"error": "Unauthorized"}), 401
 
-    # ── Parse & Validate ──────────────────────────────────────────────────────
     action = str(data.get("action", "")).strip().lower()
     symbol = str(data.get("symbol", Config.SYMBOL)).strip().upper()
 
@@ -83,63 +111,98 @@ def webhook():
     if action not in ("buy", "sell"):
         return jsonify({"error": f"action ต้องเป็น buy หรือ sell ไม่ใช่ '{action}'"}), 400
 
-    # ── Execute ───────────────────────────────────────────────────────────────
-    try:
-        result = asyncio.run(_execute(action, symbol, price))
-        return jsonify({"status": "success", "result": result})
-    except Exception as exc:
-        log.error("[EXECUTE ERROR] %s", exc, exc_info=True)
-        return jsonify({"error": str(exc)}), 500
+    # Store signal
+    signal_id = str(uuid.uuid4())
+    now       = datetime.now(timezone.utc).isoformat()
+
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO signals (id, action, symbol, price, status, created) VALUES (?, ?, ?, ?, 'pending', ?)",
+            (signal_id, action, symbol, price, now),
+        )
+        conn.commit()
+
+    log.info("[STORED] id=%s  %s %s @ %s", signal_id, action, symbol, price)
+    return jsonify({"status": "stored", "signal_id": signal_id})
 
 
-# ── Core Trade Logic ──────────────────────────────────────────────────────────
-
-async def _execute(action: str, symbol: str, price: float) -> dict:
+@app.get("/get_signal")
+def get_signal():
     """
-    1. Connect MT5
-    2. คำนวณ ATR จาก Candle History
-    3. คำนวณ TP1 / TP2 / TP3 / SL
-    4. เปิด 3 Orders แบ่ง Lot
+    MT5 EA polls นี้ทุก N วินาที
+
+    ต้องส่ง ?api_key=... ใน query string
+    คืน oldest pending signal หรือ {"status":"none"} ถ้าไม่มี
     """
+    if request.args.get("api_key") != Config.API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
 
-    # 1. Connect
-    account = await mt5.connect()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM signals WHERE status = 'pending' ORDER BY created ASC LIMIT 1"
+        ).fetchone()
 
-    # 2. ATR
-    calc = ATRCalculator(account)
-    atr  = await calc.get_atr(symbol)
+    if row is None:
+        return jsonify({"status": "none"})
 
-    # 3. Levels
-    levels = calc.calculate_levels(
-        entry  = price,
-        action = action,
-        atr    = atr,
-    )
+    return jsonify({
+        "status":  "ok",
+        "id":      row["id"],
+        "action":  row["action"],
+        "symbol":  row["symbol"],
+        "price":   row["price"],
+        "created": row["created"],
+    })
 
-    # 4. Orders
-    orders = await mt5.place_split_orders(
-        symbol = symbol,
-        action = action,
-        levels = levels,
-    )
 
-    success_count = sum(1 for o in orders if o.get("success"))
-    log.info("[DONE] %s/%s orders สำเร็จ  levels=%s", success_count, len(orders), levels)
+@app.post("/confirm_signal")
+def confirm_signal():
+    """
+    MT5 EA เรียกหลังจาก trade executed เรียบร้อย
 
-    return {
-        "symbol":  symbol,
-        "action":  action,
-        "price":   price,
-        "atr":     atr,
-        "levels":  levels,
-        "orders":  orders,
-        "success": success_count,
-    }
+    Body: { "api_key": "...", "id": "<signal-uuid>" }
+    """
+    data = request.get_json(silent=True) or {}
+
+    if data.get("api_key") != Config.API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    signal_id = data.get("id")
+    if not signal_id:
+        return jsonify({"error": "missing id"}), 400
+
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        affected = conn.execute(
+            "UPDATE signals SET status='confirmed', confirmed=? WHERE id=? AND status='pending'",
+            (now, signal_id),
+        ).rowcount
+        conn.commit()
+
+    if affected == 0:
+        return jsonify({"error": "signal not found or already confirmed"}), 404
+
+    log.info("[CONFIRMED] id=%s", signal_id)
+    return jsonify({"status": "confirmed"})
+
+
+@app.get("/signals")
+def list_signals():
+    """Debug endpoint – ดู signals 50 รายการล่าสุด (ต้องมี api_key)"""
+    if request.args.get("api_key") != Config.API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM signals ORDER BY created DESC LIMIT 50"
+        ).fetchall()
+
+    return jsonify([dict(r) for r in rows])
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    log.info("Starting Trading Bot on port %s", port)
+    log.info("Starting Signal Server on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=False)
