@@ -1,4 +1,4 @@
 flask==3.0.0
 python-dotenv==1.0.0
-metaapi-cloud-sdk==27.0.0
+metaapi-cloud-sdk==29.1.1
 gunicorn==21.2.0
