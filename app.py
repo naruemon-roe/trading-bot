@@ -16,6 +16,8 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
+import requests
+
 from flask import Flask, request, jsonify
 
 from config import Config
@@ -50,11 +52,17 @@ def init_db():
                 action    TEXT NOT NULL,
                 symbol    TEXT NOT NULL,
                 price     REAL NOT NULL,
+                timeframe TEXT NOT NULL DEFAULT '',
                 status    TEXT NOT NULL DEFAULT 'pending',
                 created   TEXT NOT NULL,
                 confirmed TEXT
             )
         """)
+        # migrate existing DB — add timeframe column if missing
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN timeframe TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.commit()
 
 init_db()
@@ -64,6 +72,41 @@ def _db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ── Discord Notification ──────────────────────────────────────────────────────
+
+def send_discord(action: str, symbol: str, price: float, timeframe: str, signal_id: str) -> None:
+    """ส่ง embed notification ไป Discord Webhook"""
+    url = Config.DISCORD_WEBHOOK_URL
+    if not url:
+        return
+
+    is_buy = action.lower() == "buy"
+    color  = 0x2ECC71 if is_buy else 0xE74C3C  # green | red
+    emoji  = "\U0001f7e2" if is_buy else "\U0001f534"
+
+    payload = {
+        "embeds": [{
+            "title":  f"{emoji} {action.upper()} Signal | {symbol}",
+            "color":  color,
+            "fields": [
+                {"name": "Symbol",    "value": symbol,             "inline": True},
+                {"name": "Action",    "value": action.upper(),     "inline": True},
+                {"name": "Price",     "value": str(price),         "inline": True},
+                {"name": "Timeframe", "value": timeframe or "N/A", "inline": True},
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer":    {"text": f"Signal ID: {signal_id}"},
+        }]
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=5)
+        if resp.status_code not in (200, 204):
+            log.warning("[DISCORD] HTTP %s", resp.status_code)
+    except Exception as exc:
+        log.warning("[DISCORD] failed: %s", exc)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -78,7 +121,7 @@ def health():
     })
 
 
-@app.post("/webhook")
+@app.post("/V2/webhook")
 def webhook():
     """
     รับ JSON Payload จาก TradingView Alert
@@ -99,8 +142,9 @@ def webhook():
         log.warning("[WEBHOOK] Unauthorized")
         return jsonify({"error": "Unauthorized"}), 401
 
-    action = str(data.get("action", "")).strip().lower()
-    symbol = str(data.get("symbol", Config.SYMBOL)).strip().upper()
+    action    = str(data.get("action", "")).strip().lower()
+    symbol    = str(data.get("symbol", Config.SYMBOL)).strip().upper()
+    timeframe = str(data.get("timeframe", "")).strip()
 
     try:
         price = float(data["price"])
@@ -117,12 +161,13 @@ def webhook():
 
     with _db() as conn:
         conn.execute(
-            "INSERT INTO signals (id, action, symbol, price, status, created) VALUES (?, ?, ?, ?, 'pending', ?)",
-            (signal_id, action, symbol, price, now),
+            "INSERT INTO signals (id, action, symbol, price, timeframe, status, created) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (signal_id, action, symbol, price, timeframe, now),
         )
         conn.commit()
 
-    log.info("[STORED] id=%s  %s %s @ %s", signal_id, action, symbol, price)
+    log.info("[STORED] id=%s  %s %s @ %s  tf=%s", signal_id, action, symbol, price, timeframe)
+    send_discord(action, symbol, price, timeframe, signal_id)
     return jsonify({"status": "stored", "signal_id": signal_id})
 
 
@@ -146,12 +191,13 @@ def get_signal():
         return jsonify({"status": "none"})
 
     return jsonify({
-        "status":  "ok",
-        "id":      row["id"],
-        "action":  row["action"],
-        "symbol":  row["symbol"],
-        "price":   row["price"],
-        "created": row["created"],
+        "status":    "ok",
+        "id":        row["id"],
+        "action":    row["action"],
+        "symbol":    row["symbol"],
+        "price":     row["price"],
+        "timeframe": row["timeframe"],
+        "created":   row["created"],
     })
 
 

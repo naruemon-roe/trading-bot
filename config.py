@@ -12,3 +12,7 @@ class Config:
     # ── Trading default ───────────────────────────────────────────────────────
     # Symbol default ถ้า TradingView ไม่ส่งมา
     SYMBOL = os.getenv("SYMBOL", "XAUUSD")
+
+    # ── Discord ───────────────────────────────────────────────────────────────
+    # ใส่ Discord Webhook URL เพื่อรับแจ้งเตือน (ถ้าไม่ต้องการให้เว้นว่าง)
+    DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")

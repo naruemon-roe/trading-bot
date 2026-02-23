@@ -86,9 +86,10 @@ void CheckAndExecuteSignal()
    }
 
    // ── Parse JSON fields ──────────────────────────────────────────
-   string sig_id = JsonGetString(response, "id");
-   string action = JsonGetString(response, "action");   // "buy" or "sell"
-   double price  = JsonGetDouble(response, "price");
+   string sig_id    = JsonGetString(response, "id");
+   string action    = JsonGetString(response, "action");    // "buy" or "sell"
+   double price     = JsonGetDouble(response, "price");
+   string timeframe = JsonGetString(response, "timeframe"); // e.g. "1", "5", "60", "D"
 
    if(sig_id == "" || action == "" || price <= 0)
    {
@@ -96,7 +97,7 @@ void CheckAndExecuteSignal()
       return;
    }
 
-   Print("[SIGNAL] id=", sig_id, "  action=", action, "  price=", price);
+   Print("[SIGNAL] id=", sig_id, "  action=", action, "  price=", price, "  tf=", timeframe);
 
    // ── Execute trade ──────────────────────────────────────────────
    bool ok = ExecuteTrade(action, price);
